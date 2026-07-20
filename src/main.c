@@ -228,6 +228,54 @@ static void on_selection(GtkTreeSelection *sel,gpointer data){ App *a=data; GtkT
 static void new_chat(App *a,gboolean temporary){ Chat *c=chat_new(temporary); g_ptr_array_add(a->chats,c); refresh_list(a); select_chat(a,c); if(!temporary)save_history(a); }
 static void on_new(GtkButton *b,gpointer data){(void)b;new_chat(data,FALSE);} static void on_temp(GtkButton *b,gpointer data){(void)b;new_chat(data,TRUE);}
 
+static void on_delete_chat(GtkButton *button, gpointer data) {
+    App *a = data;
+    GtkWidget *dialog;
+    guint index;
+    (void)button;
+
+    if (!a->current)
+        return;
+    if (a->busy) {
+        dialog = gtk_message_dialog_new(GTK_WINDOW(a->window), GTK_DIALOG_MODAL,
+            GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "Нельзя удалить чат во время получения ответа.");
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        return;
+    }
+    dialog = gtk_message_dialog_new(GTK_WINDOW(a->window), GTK_DIALOG_MODAL,
+        GTK_MESSAGE_QUESTION, GTK_BUTTONS_YES_NO,
+        "Удалить чат «%s»?\nЭто действие нельзя отменить.", a->current->title);
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) != GTK_RESPONSE_YES) {
+        gtk_widget_destroy(dialog);
+        return;
+    }
+    gtk_widget_destroy(dialog);
+
+    for (index = 0; index < a->chats->len; index++)
+        if (g_ptr_array_index(a->chats, index) == a->current)
+            break;
+    if (index == a->chats->len)
+        return;
+
+    a->current = NULL;
+    g_ptr_array_remove_index(a->chats, index);
+    if (!a->chats->len) {
+        new_chat(a, FALSE);
+    } else {
+        GtkTreePath *path;
+        if (index >= a->chats->len)
+            index = a->chats->len - 1;
+        refresh_list(a);
+        select_chat(a, g_ptr_array_index(a->chats, index));
+        path = gtk_tree_path_new_from_indices((gint)index, -1);
+        gtk_tree_selection_select_path(gtk_tree_view_get_selection(GTK_TREE_VIEW(a->chat_list)), path);
+        gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(a->chat_list), path, NULL, FALSE, 0, 0);
+        gtk_tree_path_free(path);
+    }
+    schedule_autosave(a);
+}
+
 static json_object *messages_json(Chat *c){ json_object *arr=json_object_new_array(),*o; guint i;
     if(c->system_prompt[0]){o=json_object_new_object();json_object_object_add(o,"role",json_object_new_string("system"));json_object_object_add(o,"content",json_object_new_string(c->system_prompt));json_object_array_add(arr,o);}
     for(i=0;i<c->messages->len;i++){Message*m=g_ptr_array_index(c->messages,i);o=json_object_new_object();json_object_object_add(o,"role",json_object_new_string(m->role));json_object_object_add(o,"content",json_object_new_string(m->text));json_object_array_add(arr,o);} return arr;
@@ -455,7 +503,7 @@ static GtkWidget *scroll(GtkWidget*w){GtkWidget*s=gtk_scrolled_window_new(NULL,N
 static void build_ui(App*a){
     GtkWidget*v=gtk_vbox_new(FALSE,4),*tools=gtk_hbox_new(FALSE,4),*paned=gtk_hpaned_new();
     GtkWidget*right=gtk_vbox_new(FALSE,4),*compose=gtk_hbox_new(FALSE,4);
-    GtkWidget*n=gtk_button_new_with_label("Новый"),*tmp=gtk_button_new_with_label("Временный");
+    GtkWidget*n=gtk_button_new_with_label("Новый"),*tmp=gtk_button_new_with_label("Временный"),*del=gtk_button_new_with_label("Удалить");
     GtkWidget*settings=gtk_button_new_from_stock(GTK_STOCK_PREFERENCES),*emoji=gtk_button_new_with_label("😀");
     GtkListStore*store=gtk_list_store_new(2,G_TYPE_STRING,G_TYPE_UINT);GtkCellRenderer*r=gtk_cell_renderer_text_new();
     GtkTreeViewColumn*col=gtk_tree_view_column_new_with_attributes("Чаты",r,"text",0,NULL);GtkWidget*is;
@@ -466,14 +514,14 @@ static void build_ui(App*a){
     a->transcript=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(a->transcript),FALSE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(a->transcript),GTK_WRAP_WORD_CHAR);
     a->input=gtk_text_view_new();gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(a->input),GTK_WRAP_WORD_CHAR);
     a->send=gtk_button_new_with_label("Отправить");a->status=gtk_label_new("Готово");gtk_misc_set_alignment(GTK_MISC(a->status),0,0.5);
-    gtk_box_pack_start(GTK_BOX(tools),n,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(tools),tmp,FALSE,FALSE,0);gtk_box_pack_end(GTK_BOX(tools),settings,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(v),tools,FALSE,FALSE,0);
+    gtk_box_pack_start(GTK_BOX(tools),n,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(tools),tmp,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(tools),del,FALSE,FALSE,0);gtk_box_pack_end(GTK_BOX(tools),settings,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(v),tools,FALSE,FALSE,0);
     gtk_paned_pack1(GTK_PANED(paned),scroll(a->chat_list),FALSE,FALSE);gtk_box_pack_start(GTK_BOX(right),scroll(a->transcript),TRUE,TRUE,0);
     is=scroll(a->input);gtk_widget_set_size_request(is,-1,85);gtk_box_pack_start(GTK_BOX(compose),is,TRUE,TRUE,0);
     gtk_box_pack_start(GTK_BOX(compose),emoji,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(compose),a->send,FALSE,FALSE,0);
     gtk_box_pack_start(GTK_BOX(right),compose,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(right),a->status,FALSE,FALSE,0);
     a->paned=paned;gtk_paned_pack2(GTK_PANED(paned),right,TRUE,FALSE);gtk_paned_set_position(GTK_PANED(paned),a->paned_position);gtk_box_pack_start(GTK_BOX(v),paned,TRUE,TRUE,0);gtk_container_add(GTK_CONTAINER(a->window),v);
     g_signal_connect(a->window,"delete-event",G_CALLBACK(on_delete_window),a);g_signal_connect(a->window,"configure-event",G_CALLBACK(on_window_configure),a);g_signal_connect(a->paned,"notify::position",G_CALLBACK(on_paned_position),a);g_signal_connect(a->window,"destroy",G_CALLBACK(gtk_main_quit),NULL);
-    g_signal_connect(n,"clicked",G_CALLBACK(on_new),a);g_signal_connect(tmp,"clicked",G_CALLBACK(on_temp),a);g_signal_connect(settings,"clicked",G_CALLBACK(on_settings),a);
+    g_signal_connect(n,"clicked",G_CALLBACK(on_new),a);g_signal_connect(tmp,"clicked",G_CALLBACK(on_temp),a);g_signal_connect(del,"clicked",G_CALLBACK(on_delete_chat),a);g_signal_connect(settings,"clicked",G_CALLBACK(on_settings),a);
     g_signal_connect(emoji,"clicked",G_CALLBACK(on_emoji),a);g_signal_connect(a->send,"clicked",G_CALLBACK(on_send),a);
     g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(a->chat_list)),"changed",G_CALLBACK(on_selection),a);gtk_widget_show_all(a->window);
 }
