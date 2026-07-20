@@ -444,6 +444,9 @@ static void on_send(GtkButton*b,gpointer data){
 
 static gboolean on_input_key_press(GtkWidget *widget, GdkEventKey *event, gpointer data) {
     gboolean enter = event->keyval == GDK_Return || event->keyval == GDK_KP_Enter;
+#ifdef GDK_ISO_Enter
+    enter = enter || event->keyval == GDK_ISO_Enter;
+#endif
     (void)widget;
     if (enter && !(event->state & GDK_SHIFT_MASK)) {
         on_send(NULL, data);
@@ -520,15 +523,15 @@ static void build_ui(App*a){
     GtkWidget*right=gtk_vbox_new(FALSE,4),*compose=gtk_hbox_new(FALSE,4);
     GtkWidget*n=gtk_button_new_with_label("Новый"),*tmp=gtk_button_new_with_label("Временный"),*del=gtk_button_new_with_label("Удалить");
     GtkWidget*settings=gtk_button_new_from_stock(GTK_STOCK_PREFERENCES),*emoji=gtk_button_new_with_label("😀");
-    GtkListStore*store=gtk_list_store_new(2,G_TYPE_STRING,G_TYPE_UINT);GtkCellRenderer*r=gtk_cell_renderer_text_new();
+    GtkListStore*store=gtk_list_store_new(2,G_TYPE_STRING,G_TYPE_UINT);GtkCellRenderer*r=gtk_cell_renderer_text_new();GtkAccelGroup*accel=gtk_accel_group_new();
     GtkTreeViewColumn*col=gtk_tree_view_column_new_with_attributes("Чаты",r,"text",0,NULL);GtkWidget*is;
-    a->window=gtk_window_new(GTK_WINDOW_TOPLEVEL);gtk_window_set_title(GTK_WINDOW(a->window),"GTK2 AI Chat");
+    a->window=gtk_window_new(GTK_WINDOW_TOPLEVEL);gtk_window_set_title(GTK_WINDOW(a->window),"GTK2 AI Chat");gtk_window_add_accel_group(GTK_WINDOW(a->window),accel);
     gtk_window_set_default_size(GTK_WINDOW(a->window),a->window_width,a->window_height);gtk_container_set_border_width(GTK_CONTAINER(a->window),5);
     a->chat_list=gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));g_object_unref(store);
     gtk_tree_view_append_column(GTK_TREE_VIEW(a->chat_list),col);gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(a->chat_list),FALSE);
     a->transcript=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(a->transcript),FALSE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(a->transcript),GTK_WRAP_WORD_CHAR);
     a->input=gtk_text_view_new();gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(a->input),GTK_WRAP_WORD_CHAR);
-    a->send=gtk_button_new_with_label("Отправить");a->status=gtk_label_new("Готово");gtk_misc_set_alignment(GTK_MISC(a->status),0,0.5);
+    a->send=gtk_button_new_with_label("Отправить");gtk_widget_add_accelerator(a->send,"clicked",accel,GDK_Return,0,GTK_ACCEL_VISIBLE);gtk_widget_add_accelerator(a->send,"clicked",accel,GDK_KP_Enter,0,GTK_ACCEL_VISIBLE);g_object_unref(accel);a->status=gtk_label_new("Готово");gtk_misc_set_alignment(GTK_MISC(a->status),0,0.5);
     gtk_box_pack_start(GTK_BOX(tools),n,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(tools),tmp,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(tools),del,FALSE,FALSE,0);gtk_box_pack_end(GTK_BOX(tools),settings,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(v),tools,FALSE,FALSE,0);
     gtk_paned_pack1(GTK_PANED(paned),scroll(a->chat_list),FALSE,FALSE);gtk_box_pack_start(GTK_BOX(right),scroll(a->transcript),TRUE,TRUE,0);
     is=scroll(a->input);gtk_widget_set_size_request(is,-1,85);gtk_box_pack_start(GTK_BOX(compose),is,TRUE,TRUE,0);
