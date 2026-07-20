@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=GTK2 AI Chat
+Name[ru]=Чат с ИИ
+Comment=Lightweight AI chat client for OpenAI and Ollama
+Comment[ru]=Лёгкий клиент чата с ИИ для OpenAI и Ollama
+Exec=/home/kira/apps/gtk2aichat
+TryExec=/home/kira/apps/gtk2aichat
+Icon=applications-internet
+Terminal=false
+StartupNotify=true
+Categories=Network;Chat;
+Keywords=AI;Chat;OpenAI;Ollama;
+Keywords[ru]=ИИ;Чат;OpenAI;Ollama;

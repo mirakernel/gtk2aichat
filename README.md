@@ -23,6 +23,14 @@ make
 ./gtk2aichat
 ```
 
+Файл `gtk2aichat.desktop` рассчитан на установленный бинарник
+`/home/kira/apps/gtk2aichat`. Для появления приложения в пользовательском меню:
+
+```sh
+install -Dm755 gtk2aichat /home/kira/apps/gtk2aichat
+install -Dm644 gtk2aichat.desktop ~/.local/share/applications/gtk2aichat.desktop
+```
+
 Настройки и история находятся в каталоге `~/.config/gtk2aichat/`. Размер окна,
 положение разделителя и параметры провайдеров восстанавливаются при следующем
 запуске. Чаты автоматически сохраняются после изменений и во время streaming;
