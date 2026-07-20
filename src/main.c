@@ -30,8 +30,27 @@ typedef struct {
 } App;
 
 typedef struct { char *data; size_t len; } Buffer;
-typedef struct { App *app; Chat *chat; gchar *request; } Job;
-typedef struct { App *app; Chat *chat; gchar *answer; gchar *error; } Result;
+typedef struct {
+    App *app;
+    Chat *chat;
+    Message *answer;
+    gchar *request, *url, *key;
+    gboolean openai;
+} Job;
+typedef struct {
+    App *app;
+    Chat *chat;
+    Message *answer;
+    gchar *delta;
+    gchar *error;
+    gboolean done;
+} StreamEvent;
+typedef struct {
+    Job *job;
+    Buffer response;
+    GString *pending;
+    gboolean received_text;
+} StreamContext;
 
 static void message_free(gpointer p) {
     Message *m = p; if (!m) return; g_free(m->role); g_free(m->text); g_free(m);
@@ -125,31 +144,233 @@ static json_object *messages_json(Chat *c){ json_object *arr=json_object_new_arr
     if(c->system_prompt[0]){o=json_object_new_object();json_object_object_add(o,"role",json_object_new_string("system"));json_object_object_add(o,"content",json_object_new_string(c->system_prompt));json_object_array_add(arr,o);}
     for(i=0;i<c->messages->len;i++){Message*m=g_ptr_array_index(c->messages,i);o=json_object_new_object();json_object_object_add(o,"role",json_object_new_string(m->role));json_object_object_add(o,"content",json_object_new_string(m->text));json_object_array_add(arr,o);} return arr;
 }
-static size_t write_cb(void *p,size_t s,size_t n,void *u){ Buffer*b=u; size_t z=s*n; char*q=realloc(b->data,b->len+z+1); if(!q)return 0;b->data=q;memcpy(q+b->len,p,z);b->len+=z;q[b->len]=0;return z; }
+static gboolean deliver_stream(gpointer p) {
+    StreamEvent *event = p;
+    App *a = event->app;
+
+    if (event->delta && *event->delta) {
+        gchar *joined = g_strconcat(event->answer->text, event->delta, NULL);
+        set_str(&event->answer->text, joined);
+        g_free(joined);
+    }
+    if (event->error) {
+        gchar *shown = event->answer->text[0]
+            ? g_strdup_printf("%s\n\n[Ошибка: %s]", event->answer->text, event->error)
+            : g_strdup_printf("Ошибка: %s", event->error);
+        set_str(&event->answer->text, shown);
+        g_free(shown);
+    }
+    if (a->current == event->chat)
+        refresh_transcript(a);
+    if (event->done) {
+        if (!event->chat->temporary)
+            save_history(a);
+        a->busy = FALSE;
+        gtk_widget_set_sensitive(a->send, TRUE);
+        gtk_label_set_text(GTK_LABEL(a->status), event->error ? "Ошибка" : "Готово");
+    }
+    g_free(event->delta);
+    g_free(event->error);
+    g_free(event);
+    return FALSE;
+}
+
+static void queue_stream_event(Job *job, const gchar *delta, const gchar *error, gboolean done) {
+    StreamEvent *event = g_new0(StreamEvent, 1);
+    event->app = job->app;
+    event->chat = job->chat;
+    event->answer = job->answer;
+    event->delta = g_strdup(delta);
+    event->error = g_strdup(error);
+    event->done = done;
+    g_idle_add(deliver_stream, event);
+}
+
+static gchar *parse_stream_line(Job *job, const gchar *line) {
+    json_object *root, *a, *b, *c;
+    const gchar *json = line;
+    gchar *result = NULL;
+
+    while (g_ascii_isspace(*json)) json++;
+    if (job->openai) {
+        if (!g_str_has_prefix(json, "data:"))
+            return NULL;
+        json += 5;
+        while (g_ascii_isspace(*json)) json++;
+        if (!strcmp(json, "[DONE]"))
+            return NULL;
+    }
+    if (!*json)
+        return NULL;
+
+    root = json_tokener_parse(json);
+    if (!root)
+        return NULL;
+    if (job->openai && json_object_object_get_ex(root,"choices",&a) && json_object_array_length(a)>0) {
+        b=json_object_array_get_idx(a,0);
+        if(json_object_object_get_ex(b,"delta",&c) && json_object_object_get_ex(c,"content",&a))
+            result=g_strdup(json_object_get_string(a));
+    } else if (!job->openai && json_object_object_get_ex(root,"message",&a) && json_object_object_get_ex(a,"content",&b)) {
+        result=g_strdup(json_object_get_string(b));
+    }
+    json_object_put(root);
+    return result;
+}
+
+static void process_complete_lines(StreamContext *ctx) {
+    gchar *newline;
+    GString *delta = g_string_new("");
+
+    while ((newline = strchr(ctx->pending->str, '\n')) != NULL) {
+        gsize length = (gsize)(newline - ctx->pending->str);
+        gchar *line = g_strndup(ctx->pending->str, length);
+        gchar *piece;
+        if (length && line[length - 1] == '\r')
+            line[length - 1] = '\0';
+        piece = parse_stream_line(ctx->job, line);
+        if (piece) {
+            g_string_append(delta, piece);
+            ctx->received_text = TRUE;
+            g_free(piece);
+        }
+        g_free(line);
+        g_string_erase(ctx->pending, 0, length + 1);
+    }
+    if (delta->len)
+        queue_stream_event(ctx->job, delta->str, NULL, FALSE);
+    g_string_free(delta, TRUE);
+}
+
+static size_t write_cb(void *p,size_t s,size_t n,void *u){
+    StreamContext *ctx=u;
+    size_t z=s*n;
+    char*q=realloc(ctx->response.data,ctx->response.len+z+1);
+    if(!q)return 0;
+    ctx->response.data=q;
+    memcpy(q+ctx->response.len,p,z);
+    ctx->response.len+=z;
+    q[ctx->response.len]=0;
+    g_string_append_len(ctx->pending,p,z);
+    process_complete_lines(ctx);
+    return z;
+}
 static gchar *extract_answer(const char *body,gboolean openai){ json_object*r=json_tokener_parse(body),*x,*y,*z; gchar*out=NULL;
     if(!r)
         return NULL;
     if(json_object_object_get_ex(r,"error",&x)){
-        if(json_object_object_get_ex(x,"message",&y))out=g_strdup(json_object_get_string(y));
+        if(json_object_is_type(x,json_type_string))out=g_strdup(json_object_get_string(x));
+        else if(json_object_object_get_ex(x,"message",&y))out=g_strdup(json_object_get_string(y));
     }
     else if(openai&&json_object_object_get_ex(r,"choices",&x)&&json_object_array_length(x)>0){y=json_object_array_get_idx(x,0);if(json_object_object_get_ex(y,"message",&z)&&json_object_object_get_ex(z,"content",&x))out=g_strdup(json_object_get_string(x));}
     else if(!openai&&json_object_object_get_ex(r,"message",&x)&&json_object_object_get_ex(x,"content",&y))out=g_strdup(json_object_get_string(y));
     json_object_put(r);
     return out;
 }
-static gboolean deliver(gpointer p){ Result*r=p; App*a=r->app; if(r->answer)add_message(r->chat,"assistant",r->answer); else add_message(r->chat,"assistant",r->error?r->error:"Неизвестная ошибка"); if(a->current==r->chat)refresh_transcript(a);
-    if(!r->chat->temporary)
-        save_history(a);
-    a->busy=FALSE;gtk_widget_set_sensitive(a->send,TRUE);gtk_label_set_text(GTK_LABEL(a->status),r->error?"Ошибка":"Готово");g_free(r->answer);g_free(r->error);g_free(r);return FALSE; }
-static gpointer worker(gpointer p){ Job*j=p;App*a=j->app;gboolean oa=!strcmp(a->provider,"openai");CURL*c=curl_easy_init();Buffer b={calloc(1,1),0};struct curl_slist*h=NULL;Result*r=g_new0(Result,1);CURLcode rc;long status=0;
-    r->app=a;r->chat=j->chat;h=curl_slist_append(h,"Content-Type: application/json");if(oa&&a->openai_key[0]){gchar*auth=g_strdup_printf("Authorization: Bearer %s",a->openai_key);h=curl_slist_append(h,auth);g_free(auth);}curl_easy_setopt(c,CURLOPT_URL,oa?a->openai_url:a->ollama_url);curl_easy_setopt(c,CURLOPT_HTTPHEADER,h);curl_easy_setopt(c,CURLOPT_POSTFIELDS,j->request);curl_easy_setopt(c,CURLOPT_WRITEFUNCTION,write_cb);curl_easy_setopt(c,CURLOPT_WRITEDATA,&b);curl_easy_setopt(c,CURLOPT_CONNECTTIMEOUT,15L);curl_easy_setopt(c,CURLOPT_TIMEOUT,180L);curl_easy_setopt(c,CURLOPT_USERAGENT,"gtk2aichat/0.1");rc=curl_easy_perform(c);curl_easy_getinfo(c,CURLINFO_RESPONSE_CODE,&status);
-    if(rc!=CURLE_OK)r->error=g_strdup_printf("Сетевая ошибка: %s",curl_easy_strerror(rc));else{r->answer=extract_answer(b.data,oa);if(!r->answer)r->error=g_strdup_printf("HTTP %ld: %.500s",status,b.data?b.data:"");}curl_slist_free_all(h);curl_easy_cleanup(c);free(b.data);g_free(j->request);g_free(j);g_idle_add(deliver,r);return NULL; }
-static void on_send(GtkButton*b,gpointer data){(void)b;App*a=data;GtkTextBuffer*tb;GtkTextIter s,e;gchar*text;json_object*root;Job*j;if(a->busy||!a->current)return;tb=gtk_text_view_get_buffer(GTK_TEXT_VIEW(a->input));gtk_text_buffer_get_bounds(tb,&s,&e);text=gtk_text_buffer_get_text(tb,&s,&e,FALSE);g_strstrip(text);if(!*text){g_free(text);return;}add_message(a->current,"user",text);if(a->current->messages->len==1&&!a->current->temporary){gchar*t=g_utf8_substring(text,0,MIN(36,g_utf8_strlen(text,-1)));set_str(&a->current->title,t);g_free(t);refresh_list(a);}gtk_text_buffer_set_text(tb,"",-1);refresh_transcript(a);if(!a->current->temporary)save_history(a);root=json_object_new_object();json_object_object_add(root,"model",json_object_new_string(!strcmp(a->provider,"openai")?a->openai_model:a->ollama_model));json_object_object_add(root,"messages",messages_json(a->current));if(strcmp(a->provider,"openai"))json_object_object_add(root,"stream",json_object_new_boolean(FALSE));j=g_new0(Job,1);j->app=a;j->chat=a->current;j->request=g_strdup(json_object_to_json_string_ext(root,JSON_C_TO_STRING_PLAIN));json_object_put(root);a->busy=TRUE;gtk_widget_set_sensitive(a->send,FALSE);gtk_label_set_text(GTK_LABEL(a->status),"Ожидание ответа…");g_thread_unref(g_thread_new("ai-request",worker,j));g_free(text);}
+static gpointer worker(gpointer p){ Job*j=p;CURL*c=curl_easy_init();StreamContext ctx={j,{calloc(1,1),0},g_string_new(""),FALSE};struct curl_slist*h=NULL;CURLcode rc=CURLE_FAILED_INIT;long status=0;gchar*error=NULL;
+    if(c){h=curl_slist_append(h,"Content-Type: application/json");if(j->openai&&j->key[0]){gchar*auth=g_strdup_printf("Authorization: Bearer %s",j->key);h=curl_slist_append(h,auth);g_free(auth);}curl_easy_setopt(c,CURLOPT_URL,j->url);curl_easy_setopt(c,CURLOPT_HTTPHEADER,h);curl_easy_setopt(c,CURLOPT_POSTFIELDS,j->request);curl_easy_setopt(c,CURLOPT_WRITEFUNCTION,write_cb);curl_easy_setopt(c,CURLOPT_WRITEDATA,&ctx);curl_easy_setopt(c,CURLOPT_CONNECTTIMEOUT,15L);curl_easy_setopt(c,CURLOPT_TIMEOUT,180L);curl_easy_setopt(c,CURLOPT_USERAGENT,"gtk2aichat/0.2");rc=curl_easy_perform(c);curl_easy_getinfo(c,CURLINFO_RESPONSE_CODE,&status);}
+    if(ctx.pending->len){g_string_append_c(ctx.pending,'\n');process_complete_lines(&ctx);}
+    if(rc!=CURLE_OK)error=g_strdup_printf("Сетевая ошибка: %s",curl_easy_strerror(rc));
+    else if(status<200||status>=300){gchar*api=extract_answer(ctx.response.data?ctx.response.data:"",j->openai);error=api?api:g_strdup_printf("HTTP %ld: %.500s",status,ctx.response.data?ctx.response.data:"");}
+    else if(!ctx.received_text)error=g_strdup("Сервер вернул пустой ответ");
+    queue_stream_event(j,NULL,error,TRUE);g_free(error);curl_slist_free_all(h);if(c)curl_easy_cleanup(c);free(ctx.response.data);g_string_free(ctx.pending,TRUE);g_free(j->request);g_free(j->url);g_free(j->key);g_free(j);return NULL; }
+static void on_send(GtkButton*b,gpointer data){
+    App*a=data;GtkTextBuffer*tb;GtkTextIter s,e;gchar*text;json_object*root;Job*j;Message*answer;
+    (void)b;
+    if(a->busy||!a->current)return;
+    tb=gtk_text_view_get_buffer(GTK_TEXT_VIEW(a->input));
+    gtk_text_buffer_get_bounds(tb,&s,&e);
+    text=gtk_text_buffer_get_text(tb,&s,&e,FALSE);
+    g_strstrip(text);
+    if(!*text){g_free(text);return;}
+    add_message(a->current,"user",text);
+    if(a->current->messages->len==1&&!a->current->temporary){
+        gchar*t=g_utf8_substring(text,0,MIN(36,g_utf8_strlen(text,-1)));
+        set_str(&a->current->title,t);g_free(t);refresh_list(a);
+    }
+    root=json_object_new_object();
+    json_object_object_add(root,"model",json_object_new_string(!strcmp(a->provider,"openai")?a->openai_model:a->ollama_model));
+    json_object_object_add(root,"messages",messages_json(a->current));
+    json_object_object_add(root,"stream",json_object_new_boolean(TRUE));
+    j=g_new0(Job,1);j->app=a;j->chat=a->current;j->openai=!strcmp(a->provider,"openai");
+    j->url=g_strdup(j->openai?a->openai_url:a->ollama_url);j->key=g_strdup(a->openai_key);
+    j->request=g_strdup(json_object_to_json_string_ext(root,JSON_C_TO_STRING_PLAIN));
+    json_object_put(root);
+    add_message(a->current,"assistant","");
+    answer=g_ptr_array_index(a->current->messages,a->current->messages->len-1);
+    j->answer=answer;
+    gtk_text_buffer_set_text(tb,"",-1);refresh_transcript(a);
+    if(!a->current->temporary)save_history(a);
+    a->busy=TRUE;gtk_widget_set_sensitive(a->send,FALSE);
+    gtk_label_set_text(GTK_LABEL(a->status),"Получение ответа…");
+    g_thread_unref(g_thread_new("ai-request",worker,j));g_free(text);
+}
 
 static GtkWidget *entry_row(GtkTable*t,int row,const char*label,const char*value){GtkWidget*l=gtk_label_new(label),*e=gtk_entry_new();gtk_misc_set_alignment(GTK_MISC(l),0,0.5);gtk_entry_set_text(GTK_ENTRY(e),value?value:"");gtk_table_attach(t,l,0,1,row,row+1,GTK_FILL,GTK_FILL,4,3);gtk_table_attach(t,e,1,2,row,row+1,GTK_EXPAND|GTK_FILL,GTK_FILL,4,3);return e;}
 static void on_settings(GtkButton*b,gpointer data){(void)b;App*a=data;GtkWidget*d=gtk_dialog_new_with_buttons("Настройки",GTK_WINDOW(a->window),GTK_DIALOG_MODAL,GTK_STOCK_CANCEL,GTK_RESPONSE_CANCEL,GTK_STOCK_SAVE,GTK_RESPONSE_OK,NULL),*t=gtk_table_new(7,2,FALSE),*combo=gtk_combo_box_new_text(),*sys,*ou,*ok,*om,*lu,*lm;gtk_combo_box_append_text(GTK_COMBO_BOX(combo),"ollama");gtk_combo_box_append_text(GTK_COMBO_BOX(combo),"openai");gtk_combo_box_set_active(GTK_COMBO_BOX(combo),!strcmp(a->provider,"openai"));gtk_table_attach(GTK_TABLE(t),gtk_label_new("Провайдер"),0,1,0,1,GTK_FILL,GTK_FILL,4,3);gtk_table_attach(GTK_TABLE(t),combo,1,2,0,1,GTK_FILL,GTK_FILL,4,3);ou=entry_row(GTK_TABLE(t),1,"OpenAI URL",a->openai_url);ok=entry_row(GTK_TABLE(t),2,"OpenAI ключ",a->openai_key);gtk_entry_set_visibility(GTK_ENTRY(ok),FALSE);om=entry_row(GTK_TABLE(t),3,"OpenAI модель",a->openai_model);lu=entry_row(GTK_TABLE(t),4,"Ollama URL",a->ollama_url);lm=entry_row(GTK_TABLE(t),5,"Ollama модель",a->ollama_model);sys=entry_row(GTK_TABLE(t),6,"Системный промпт",a->current?a->current->system_prompt:"");gtk_box_pack_start(GTK_BOX(GTK_DIALOG(d)->vbox),t,TRUE,TRUE,6);gtk_widget_show_all(d);if(gtk_dialog_run(GTK_DIALOG(d))==GTK_RESPONSE_OK){set_str(&a->provider,gtk_combo_box_get_active(GTK_COMBO_BOX(combo))?"openai":"ollama");set_str(&a->openai_url,gtk_entry_get_text(GTK_ENTRY(ou)));set_str(&a->openai_key,gtk_entry_get_text(GTK_ENTRY(ok)));set_str(&a->openai_model,gtk_entry_get_text(GTK_ENTRY(om)));set_str(&a->ollama_url,gtk_entry_get_text(GTK_ENTRY(lu)));set_str(&a->ollama_model,gtk_entry_get_text(GTK_ENTRY(lm)));if(a->current)set_str(&a->current->system_prompt,gtk_entry_get_text(GTK_ENTRY(sys)));save_settings(a);save_history(a);}gtk_widget_destroy(d);}
 
+static void on_emoji_pick(GtkMenuItem *item, gpointer data) {
+    App *a = data;
+    GtkTextBuffer *buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(a->input));
+    gtk_text_buffer_insert_at_cursor(buffer, gtk_menu_item_get_label(item), -1);
+    gtk_widget_grab_focus(a->input);
+}
+
+static void on_emoji(GtkButton *button, gpointer data) {
+    static const gchar *emoji[] = {
+        "😀", "😂", "😊", "😍", "🤔", "👍", "👎", "❤️",
+        "🔥", "🎉", "✅", "❌", "⚠️", "💡", "🚀", "🙏", NULL
+    };
+    GtkWidget *menu = gtk_menu_new();
+    guint i;
+    (void)button;
+    for (i = 0; emoji[i]; i++) {
+        GtkWidget *item = gtk_menu_item_new_with_label(emoji[i]);
+        g_signal_connect(item, "activate", G_CALLBACK(on_emoji_pick), data);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menu), item);
+    }
+    gtk_widget_show_all(menu);
+    gtk_menu_popup(GTK_MENU(menu), NULL, NULL, NULL, NULL, 0, gtk_get_current_event_time());
+}
+
+static gboolean on_delete_window(GtkWidget *widget, GdkEvent *event, gpointer data) {
+    App *a = data;
+    (void)widget;
+    (void)event;
+    if (a->busy) {
+        GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(a->window), GTK_DIALOG_MODAL,
+            GTK_MESSAGE_INFO, GTK_BUTTONS_OK, "Дождитесь окончания ответа перед закрытием приложения.");
+        gtk_dialog_run(GTK_DIALOG(dialog));
+        gtk_widget_destroy(dialog);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static GtkWidget *scroll(GtkWidget*w){GtkWidget*s=gtk_scrolled_window_new(NULL,NULL);gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(s),GTK_POLICY_AUTOMATIC,GTK_POLICY_AUTOMATIC);gtk_container_add(GTK_CONTAINER(s),w);return s;}
-static void build_ui(App*a){GtkWidget*v=gtk_vbox_new(FALSE,4),*tools=gtk_hbox_new(FALSE,4),*paned=gtk_hpaned_new(),*right=gtk_vbox_new(FALSE,4),*compose=gtk_hbox_new(FALSE,4),*n=gtk_button_new_with_label("Новый"),*tmp=gtk_button_new_with_label("Временный"),*settings=gtk_button_new_from_stock(GTK_STOCK_PREFERENCES);GtkListStore*store=gtk_list_store_new(2,G_TYPE_STRING,G_TYPE_UINT);GtkCellRenderer*r=gtk_cell_renderer_text_new();GtkTreeViewColumn*col=gtk_tree_view_column_new_with_attributes("Чаты",r,"text",0,NULL);a->window=gtk_window_new(GTK_WINDOW_TOPLEVEL);gtk_window_set_title(GTK_WINDOW(a->window),"GTK2 AI Chat");gtk_window_set_default_size(GTK_WINDOW(a->window),900,560);gtk_container_set_border_width(GTK_CONTAINER(a->window),5);a->chat_list=gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));g_object_unref(store);gtk_tree_view_append_column(GTK_TREE_VIEW(a->chat_list),col);gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(a->chat_list),FALSE);a->transcript=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(a->transcript),FALSE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(a->transcript),GTK_WRAP_WORD_CHAR);a->input=gtk_text_view_new();gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(a->input),GTK_WRAP_WORD_CHAR);a->send=gtk_button_new_with_label("Отправить");a->status=gtk_label_new("Готово");gtk_misc_set_alignment(GTK_MISC(a->status),0,0.5);gtk_box_pack_start(GTK_BOX(tools),n,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(tools),tmp,FALSE,FALSE,0);gtk_box_pack_end(GTK_BOX(tools),settings,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(v),tools,FALSE,FALSE,0);gtk_paned_pack1(GTK_PANED(paned),scroll(a->chat_list),FALSE,FALSE);gtk_box_pack_start(GTK_BOX(right),scroll(a->transcript),TRUE,TRUE,0);GtkWidget*is=scroll(a->input);gtk_widget_set_size_request(is,-1,85);gtk_box_pack_start(GTK_BOX(compose),is,TRUE,TRUE,0);gtk_box_pack_start(GTK_BOX(compose),a->send,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(right),compose,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(right),a->status,FALSE,FALSE,0);gtk_paned_pack2(GTK_PANED(paned),right,TRUE,FALSE);gtk_paned_set_position(GTK_PANED(paned),190);gtk_box_pack_start(GTK_BOX(v),paned,TRUE,TRUE,0);gtk_container_add(GTK_CONTAINER(a->window),v);g_signal_connect(a->window,"destroy",G_CALLBACK(gtk_main_quit),NULL);g_signal_connect(n,"clicked",G_CALLBACK(on_new),a);g_signal_connect(tmp,"clicked",G_CALLBACK(on_temp),a);g_signal_connect(settings,"clicked",G_CALLBACK(on_settings),a);g_signal_connect(a->send,"clicked",G_CALLBACK(on_send),a);g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(a->chat_list)),"changed",G_CALLBACK(on_selection),a);gtk_widget_show_all(a->window);}
+static void build_ui(App*a){
+    GtkWidget*v=gtk_vbox_new(FALSE,4),*tools=gtk_hbox_new(FALSE,4),*paned=gtk_hpaned_new();
+    GtkWidget*right=gtk_vbox_new(FALSE,4),*compose=gtk_hbox_new(FALSE,4);
+    GtkWidget*n=gtk_button_new_with_label("Новый"),*tmp=gtk_button_new_with_label("Временный");
+    GtkWidget*settings=gtk_button_new_from_stock(GTK_STOCK_PREFERENCES),*emoji=gtk_button_new_with_label("😀");
+    GtkListStore*store=gtk_list_store_new(2,G_TYPE_STRING,G_TYPE_UINT);GtkCellRenderer*r=gtk_cell_renderer_text_new();
+    GtkTreeViewColumn*col=gtk_tree_view_column_new_with_attributes("Чаты",r,"text",0,NULL);GtkWidget*is;
+    a->window=gtk_window_new(GTK_WINDOW_TOPLEVEL);gtk_window_set_title(GTK_WINDOW(a->window),"GTK2 AI Chat");
+    gtk_window_set_default_size(GTK_WINDOW(a->window),900,560);gtk_container_set_border_width(GTK_CONTAINER(a->window),5);
+    a->chat_list=gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));g_object_unref(store);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(a->chat_list),col);gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(a->chat_list),FALSE);
+    a->transcript=gtk_text_view_new();gtk_text_view_set_editable(GTK_TEXT_VIEW(a->transcript),FALSE);gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(a->transcript),GTK_WRAP_WORD_CHAR);
+    a->input=gtk_text_view_new();gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(a->input),GTK_WRAP_WORD_CHAR);
+    a->send=gtk_button_new_with_label("Отправить");a->status=gtk_label_new("Готово");gtk_misc_set_alignment(GTK_MISC(a->status),0,0.5);
+    gtk_box_pack_start(GTK_BOX(tools),n,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(tools),tmp,FALSE,FALSE,0);gtk_box_pack_end(GTK_BOX(tools),settings,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(v),tools,FALSE,FALSE,0);
+    gtk_paned_pack1(GTK_PANED(paned),scroll(a->chat_list),FALSE,FALSE);gtk_box_pack_start(GTK_BOX(right),scroll(a->transcript),TRUE,TRUE,0);
+    is=scroll(a->input);gtk_widget_set_size_request(is,-1,85);gtk_box_pack_start(GTK_BOX(compose),is,TRUE,TRUE,0);
+    gtk_box_pack_start(GTK_BOX(compose),emoji,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(compose),a->send,FALSE,FALSE,0);
+    gtk_box_pack_start(GTK_BOX(right),compose,FALSE,FALSE,0);gtk_box_pack_start(GTK_BOX(right),a->status,FALSE,FALSE,0);
+    gtk_paned_pack2(GTK_PANED(paned),right,TRUE,FALSE);gtk_paned_set_position(GTK_PANED(paned),190);gtk_box_pack_start(GTK_BOX(v),paned,TRUE,TRUE,0);gtk_container_add(GTK_CONTAINER(a->window),v);
+    g_signal_connect(a->window,"delete-event",G_CALLBACK(on_delete_window),a);g_signal_connect(a->window,"destroy",G_CALLBACK(gtk_main_quit),NULL);
+    g_signal_connect(n,"clicked",G_CALLBACK(on_new),a);g_signal_connect(tmp,"clicked",G_CALLBACK(on_temp),a);g_signal_connect(settings,"clicked",G_CALLBACK(on_settings),a);
+    g_signal_connect(emoji,"clicked",G_CALLBACK(on_emoji),a);g_signal_connect(a->send,"clicked",G_CALLBACK(on_send),a);
+    g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(a->chat_list)),"changed",G_CALLBACK(on_selection),a);gtk_widget_show_all(a->window);
+}
 
 int main(int argc,char**argv){App a={0};if(!gtk_init_check(&argc,&argv)){g_printerr("Не удалось подключиться к графическому дисплею. Запустите программу из терминала рабочего стола или настройте DISPLAY/X11 forwarding.\n");return 1;}curl_global_init(CURL_GLOBAL_DEFAULT);a.config_dir=g_build_filename(g_get_user_config_dir(),"gtk2aichat",NULL);g_mkdir_with_parents(a.config_dir,0700);a.history_path=config_file(&a,"history.json");a.settings_path=config_file(&a,"settings.conf");a.chats=g_ptr_array_new_with_free_func(chat_free);load_settings(&a);load_history(&a);build_ui(&a);refresh_list(&a);if(!a.chats->len)new_chat(&a,FALSE);else select_chat(&a,g_ptr_array_index(a.chats,0));gtk_main();save_history(&a);save_settings(&a);g_ptr_array_free(a.chats,TRUE);g_free(a.config_dir);g_free(a.history_path);g_free(a.settings_path);g_free(a.provider);g_free(a.openai_url);g_free(a.openai_key);g_free(a.openai_model);g_free(a.ollama_url);g_free(a.ollama_model);curl_global_cleanup();return 0;}
