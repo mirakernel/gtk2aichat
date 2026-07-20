@@ -1,4 +1,5 @@
 #include <gtk/gtk.h>
+#include <gdk/gdkkeysyms.h>
 #include <curl/curl.h>
 #include <json-c/json.h>
 #include <glib/gstdio.h>
@@ -441,6 +442,16 @@ static void on_send(GtkButton*b,gpointer data){
     g_thread_unref(g_thread_new("ai-request",worker,j));g_free(text);
 }
 
+static gboolean on_input_key_press(GtkWidget *widget, GdkEventKey *event, gpointer data) {
+    gboolean enter = event->keyval == GDK_Return || event->keyval == GDK_KP_Enter;
+    (void)widget;
+    if (enter && !(event->state & GDK_SHIFT_MASK)) {
+        on_send(NULL, data);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static GtkWidget *entry_row(GtkTable*t,int row,const char*label,const char*value){GtkWidget*l=gtk_label_new(label),*e=gtk_entry_new();gtk_misc_set_alignment(GTK_MISC(l),0,0.5);gtk_entry_set_text(GTK_ENTRY(e),value?value:"");gtk_table_attach(t,l,0,1,row,row+1,GTK_FILL,GTK_FILL,4,3);gtk_table_attach(t,e,1,2,row,row+1,GTK_EXPAND|GTK_FILL,GTK_FILL,4,3);return e;}
 static void on_show_api_key(GtkToggleButton *toggle, gpointer data) {
     gtk_entry_set_visibility(GTK_ENTRY(data), gtk_toggle_button_get_active(toggle));
@@ -526,7 +537,7 @@ static void build_ui(App*a){
     a->paned=paned;gtk_paned_pack2(GTK_PANED(paned),right,TRUE,FALSE);gtk_paned_set_position(GTK_PANED(paned),a->paned_position);gtk_box_pack_start(GTK_BOX(v),paned,TRUE,TRUE,0);gtk_container_add(GTK_CONTAINER(a->window),v);
     g_signal_connect(a->window,"delete-event",G_CALLBACK(on_delete_window),a);g_signal_connect(a->window,"configure-event",G_CALLBACK(on_window_configure),a);g_signal_connect(a->paned,"notify::position",G_CALLBACK(on_paned_position),a);g_signal_connect(a->window,"destroy",G_CALLBACK(gtk_main_quit),NULL);
     g_signal_connect(n,"clicked",G_CALLBACK(on_new),a);g_signal_connect(tmp,"clicked",G_CALLBACK(on_temp),a);g_signal_connect(del,"clicked",G_CALLBACK(on_delete_chat),a);g_signal_connect(settings,"clicked",G_CALLBACK(on_settings),a);
-    g_signal_connect(emoji,"clicked",G_CALLBACK(on_emoji),a);g_signal_connect(a->send,"clicked",G_CALLBACK(on_send),a);
+    g_signal_connect(emoji,"clicked",G_CALLBACK(on_emoji),a);g_signal_connect(a->send,"clicked",G_CALLBACK(on_send),a);g_signal_connect(a->input,"key-press-event",G_CALLBACK(on_input_key_press),a);
     g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(a->chat_list)),"changed",G_CALLBACK(on_selection),a);gtk_widget_show_all(a->window);
 }
 
