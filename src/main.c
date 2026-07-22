@@ -237,9 +237,10 @@ static void ensure_chat_tags(App *a, GtkTextBuffer *buffer) {
 
 static void insert_tagged(GtkTextBuffer *buffer, const gchar *text, gssize length, GtkTextTag *tag) {
     GtkTextIter start,end;
-    gtk_text_buffer_get_end_iter(buffer,&start);
-    gtk_text_buffer_insert(buffer,&start,text,length);
-    if(tag){gtk_text_buffer_get_end_iter(buffer,&end);gtk_text_buffer_apply_tag(buffer,tag,&start,&end);}
+    gint start_offset=gtk_text_buffer_get_char_count(buffer);
+    gtk_text_buffer_get_end_iter(buffer,&end);
+    gtk_text_buffer_insert(buffer,&end,text,length);
+    if(tag){gtk_text_buffer_get_iter_at_offset(buffer,&start,start_offset);gtk_text_buffer_get_end_iter(buffer,&end);gtk_text_buffer_apply_tag(buffer,tag,&start,&end);}
 }
 
 static void insert_inline_markdown(GtkTextBuffer *buffer, const gchar *text) {
@@ -273,9 +274,10 @@ static void insert_markdown(GtkTextBuffer *buffer, const gchar *text) {
     for(i=0;lines[i];i++){
         const gchar *line=lines[i];
         GtkTextIter start,end;
+        gint start_offset;
         GtkTextTag *line_tag=NULL;
         if(g_str_has_prefix(line,"```")){code_block=!code_block;continue;}
-        gtk_text_buffer_get_end_iter(buffer,&start);
+        start_offset=gtk_text_buffer_get_char_count(buffer);
         if(code_block){insert_tagged(buffer,line,-1,NULL);line_tag=text_tag(buffer,"codeblock");}
         else if(line[0]=='#'){
             while(*line=='#')line++;
@@ -285,7 +287,7 @@ static void insert_markdown(GtkTextBuffer *buffer, const gchar *text) {
         else if(g_str_has_prefix(line,"- ")||g_str_has_prefix(line,"* ")){insert_tagged(buffer,"• ",-1,NULL);insert_inline_markdown(buffer,line+2);}
         else insert_inline_markdown(buffer,line);
         insert_tagged(buffer,"\n",-1,NULL);
-        if(line_tag){gtk_text_buffer_get_end_iter(buffer,&end);gtk_text_buffer_apply_tag(buffer,line_tag,&start,&end);}
+        if(line_tag){gtk_text_buffer_get_iter_at_offset(buffer,&start,start_offset);gtk_text_buffer_get_end_iter(buffer,&end);gtk_text_buffer_apply_tag(buffer,line_tag,&start,&end);}
     }
     g_strfreev(lines);
 }
@@ -294,10 +296,10 @@ static void refresh_transcript(App *a) {
     GtkTextBuffer *b=gtk_text_view_get_buffer(GTK_TEXT_VIEW(a->transcript));GtkTextIter start,end;guint i;gchar*rendered;
     gtk_text_buffer_set_text(b,"",-1);ensure_chat_tags(a,b);
     if(a->current)for(i=0;i<a->current->messages->len;i++){
-        Message*m=g_ptr_array_index(a->current->messages,i);gboolean user=!strcmp(m->role,"user");GtkTextTag*role=text_tag(b,user?"user":"assistant");
-        gtk_text_buffer_get_end_iter(b,&start);insert_tagged(b,user?"Вы:\n":"ИИ:\n",-1,text_tag(b,"bold"));
+        Message*m=g_ptr_array_index(a->current->messages,i);gboolean user=!strcmp(m->role,"user");GtkTextTag*role=text_tag(b,user?"user":"assistant");gint message_offset=gtk_text_buffer_get_char_count(b);
+        insert_tagged(b,user?"Вы:\n":"ИИ:\n",-1,text_tag(b,"bold"));
         if(user)insert_tagged(b,m->text,-1,NULL);else insert_markdown(b,m->text);
-        insert_tagged(b,"\n\n",-1,NULL);gtk_text_buffer_get_end_iter(b,&end);gtk_text_buffer_apply_tag(b,role,&start,&end);
+        insert_tagged(b,"\n\n",-1,NULL);gtk_text_buffer_get_iter_at_offset(b,&start,message_offset);gtk_text_buffer_get_end_iter(b,&end);gtk_text_buffer_apply_tag(b,role,&start,&end);
     }
     gtk_text_buffer_get_bounds(b,&start,&end);rendered=gtk_text_buffer_get_text(b,&start,&end,FALSE);apply_emoji_font(a,b,rendered);g_free(rendered);
     gtk_text_buffer_get_end_iter(b,&end);gtk_text_view_scroll_to_iter(GTK_TEXT_VIEW(a->transcript),&end,0,FALSE,0,0);
