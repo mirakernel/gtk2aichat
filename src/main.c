@@ -233,6 +233,7 @@ static void ensure_chat_tags(App *a, GtkTextBuffer *buffer) {
     if(!text_tag(buffer,"heading"))gtk_text_buffer_create_tag(buffer,"heading","weight",PANGO_WEIGHT_BOLD,"scale",1.25,NULL);
     if(!text_tag(buffer,"quote"))gtk_text_buffer_create_tag(buffer,"quote","style",PANGO_STYLE_ITALIC,"left-margin",18,NULL);
     if(!text_tag(buffer,"link"))gtk_text_buffer_create_tag(buffer,"link","foreground","#3465a4","underline",PANGO_UNDERLINE_SINGLE,NULL);
+    if(!text_tag(buffer,"rule"))gtk_text_buffer_create_tag(buffer,"rule","scale",0.85,NULL);
 }
 
 static void insert_tagged(GtkTextBuffer *buffer, const gchar *text, gssize length, GtkTextTag *tag) {
@@ -267,6 +268,18 @@ static void insert_inline_markdown(GtkTextBuffer *buffer, const gchar *text) {
     }
 }
 
+static gboolean is_markdown_rule(const gchar *line) {
+    gchar marker=0;
+    guint count=0;
+    while(*line){
+        if(g_ascii_isspace(*line)){line++;continue;}
+        if(!marker){if(*line!='-'&&*line!='*'&&*line!='_')return FALSE;marker=*line;}
+        if(*line!=marker)return FALSE;
+        count++;line++;
+    }
+    return count>=3;
+}
+
 static void insert_markdown(GtkTextBuffer *buffer, const gchar *text) {
     gchar **lines=g_strsplit(text,"\n",-1);
     gboolean code_block=FALSE;
@@ -279,6 +292,7 @@ static void insert_markdown(GtkTextBuffer *buffer, const gchar *text) {
         if(g_str_has_prefix(line,"```")){code_block=!code_block;continue;}
         start_offset=gtk_text_buffer_get_char_count(buffer);
         if(code_block){insert_tagged(buffer,line,-1,NULL);line_tag=text_tag(buffer,"codeblock");}
+        else if(is_markdown_rule(line)){insert_tagged(buffer,"────────────────────────────────────",-1,NULL);line_tag=text_tag(buffer,"rule");}
         else if(line[0]=='#'){
             while(*line=='#')line++;
             if(*line==' ')line++;
