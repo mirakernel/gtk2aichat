@@ -9,7 +9,6 @@ gchar *agent_tool_execute(const gchar *name,
                           json_object *arguments,
                           const gchar *project_root,
                           gboolean allow_read,
-                          gboolean allow_write,
-                          gboolean allow_build);
+                          gboolean allow_write);
 
 #endif

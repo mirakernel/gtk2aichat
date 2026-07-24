@@ -52,7 +52,7 @@ typedef struct {
     gboolean emoji_font_checked, emoji_font_available;
     gboolean busy;
     gint cancel_requested;
-    gint allow_read, allow_write, allow_build;
+    gint allow_read, allow_write;
 } App;
 
 typedef struct { char *data; size_t len; } Buffer;
@@ -592,7 +592,7 @@ static gpointer worker(gpointer p){
                 }
                 if(!args)args=json_object_new_object();
                 if(mcp_manager_has_tool(j->app->mcp,name))result=mcp_manager_call(j->app->mcp,name,args);
-                else result=agent_tool_execute(name,args,j->app->project_root,g_atomic_int_get(&j->app->allow_read),g_atomic_int_get(&j->app->allow_write),g_atomic_int_get(&j->app->allow_build));
+                else result=agent_tool_execute(name,args,j->app->project_root,g_atomic_int_get(&j->app->allow_read),g_atomic_int_get(&j->app->allow_write));
                 tool_message=json_object_new_object();json_object_object_add(tool_message,"role",json_object_new_string("tool"));json_object_object_add(tool_message,"content",json_object_new_string(result));
                 if(json_object_object_get_ex(call,"id",&id_value)){id=json_object_get_string(id_value);json_object_object_add(tool_message,"tool_call_id",json_object_new_string(id));}
                 if(!j->openai)json_object_object_add(tool_message,"tool_name",json_object_new_string(name));
@@ -840,7 +840,7 @@ static void reload_mcp(App *a){
 }
 static void on_mcp_dialog(GtkButton *button,gpointer data){
     App*a=data;GtkWidget*d,*label;gchar*text,*skills;json_object*empty=json_object_new_object();(void)button;
-    skills=agent_tool_execute("list_skills",empty,a->project_root,TRUE,FALSE,FALSE);json_object_put(empty);
+    skills=agent_tool_execute("list_skills",empty,a->project_root,TRUE,FALSE);json_object_put(empty);
     text=g_strdup_printf("Конфигурация:\n%s\n\n"
         "Формат:\n{\"servers\":[{\"name\":\"filesystem\",\"command\":\"имя-команды\",\"args\":[\"аргумент\"]}]}\n\n"
         "Подключено серверов: %u\nДоступно MCP-инструментов: %u\n\nSkills:\n%s",
@@ -979,7 +979,6 @@ static void build_ui(App*a){
     button=gtk_button_new_with_label("Выбрать папку проекта…");g_signal_connect(button,"clicked",G_CALLBACK(on_choose_project),a);gtk_box_pack_start(GTK_BOX(inspector),button,FALSE,FALSE,0);
     permission=gtk_check_button_new_with_label("Читать и искать файлы");gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(permission),TRUE);g_signal_connect(permission,"toggled",G_CALLBACK(on_permission_changed),&a->allow_read);gtk_box_pack_start(GTK_BOX(inspector),permission,FALSE,FALSE,0);
     permission=gtk_check_button_new_with_label("Создавать и изменять файлы");gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(permission),FALSE);g_signal_connect(permission,"toggled",G_CALLBACK(on_permission_changed),&a->allow_write);gtk_box_pack_start(GTK_BOX(inspector),permission,FALSE,FALSE,0);
-    permission=gtk_check_button_new_with_label("Запускать сборку и проверки");gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(permission),TRUE);g_signal_connect(permission,"toggled",G_CALLBACK(on_permission_changed),&a->allow_build);gtk_box_pack_start(GTK_BOX(inspector),permission,FALSE,FALSE,0);
     gtk_box_pack_start(GTK_BOX(inspector),gtk_hseparator_new(),FALSE,FALSE,4);a->mcp_label=left_label("MCP: 0 серверов · 0 инструментов");gtk_box_pack_start(GTK_BOX(inspector),a->mcp_label,FALSE,FALSE,0);
     button=gtk_button_new_with_label("MCP и skills…");g_signal_connect(button,"clicked",G_CALLBACK(on_mcp_dialog),a);gtk_box_pack_start(GTK_BOX(inspector),button,FALSE,FALSE,0);update_mcp_label(a);
     gtk_paned_pack1(GTK_PANED(chat),conversation,TRUE,FALSE);a->right_panel=scroll(inspector);gtk_widget_set_size_request(a->right_panel,250,-1);gtk_paned_pack2(GTK_PANED(chat),a->right_panel,FALSE,FALSE);gtk_paned_set_position(GTK_PANED(chat),620);gtk_notebook_append_page(GTK_NOTEBOOK(a->notebook),chat,NULL);gtk_notebook_append_page(GTK_NOTEBOOK(a->notebook),build_agents_page(a),NULL);gtk_notebook_append_page(GTK_NOTEBOOK(a->notebook),build_log_page(a),NULL);gtk_box_pack_start(GTK_BOX(right),a->notebook,TRUE,TRUE,0);
@@ -992,4 +991,4 @@ static void build_ui(App*a){
     g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(a->chat_list)),"changed",G_CALLBACK(on_selection),a);gtk_widget_show_all(a->window);if(!a->left_panel_visible)gtk_widget_hide(a->left_panel);if(!a->right_panel_visible)gtk_widget_hide(a->right_panel);refresh_agents(a);
 }
 
-int main(int argc,char**argv){App a={0};if(!gtk_init_check(&argc,&argv)){g_printerr("Не удалось подключиться к графическому дисплею. Запустите программу из терминала рабочего стола или настройте DISPLAY/X11 forwarding.\n");return 1;}curl_global_init(CURL_GLOBAL_DEFAULT);a.project_root=g_canonicalize_filename(".",NULL);a.allow_read=TRUE;a.allow_build=TRUE;a.config_dir=g_build_filename(g_get_user_config_dir(),"gtk2aichat",NULL);g_mkdir_with_parents(a.config_dir,0700);a.history_path=config_file(&a,"history.json");a.settings_path=config_file(&a,"settings.conf");a.agents_path=config_file(&a,"agents.json");a.chats=g_ptr_array_new_with_free_func(chat_free);a.agents=g_ptr_array_new_with_free_func(agent_free);a.attachments=g_ptr_array_new_with_free_func(g_free);load_settings(&a);if(!g_file_test(a.project_root,G_FILE_TEST_IS_DIR))set_str(&a.project_root,".");{gchar*canonical=g_canonicalize_filename(a.project_root,NULL);set_str(&a.project_root,canonical);g_free(canonical);}a.mcp=mcp_manager_new(a.project_root);load_agents(&a);load_history(&a);build_ui(&a);refresh_list(&a);if(!a.chats->len)new_chat(&a,FALSE);else select_chat(&a,g_ptr_array_index(a.chats,0));gtk_main();if(a.autosave_id)g_source_remove(a.autosave_id);save_history(&a);save_agents(&a);save_settings(&a);mcp_manager_free(a.mcp);g_ptr_array_free(a.attachments,TRUE);g_ptr_array_free(a.agents,TRUE);g_ptr_array_free(a.chats,TRUE);g_free(a.project_root);g_free(a.config_dir);g_free(a.history_path);g_free(a.settings_path);g_free(a.agents_path);g_free(a.provider);g_free(a.openai_url);g_free(a.openai_key);g_free(a.openai_model);g_free(a.ollama_url);g_free(a.ollama_model);g_free(a.emoji_font);g_free(a.user_color);g_free(a.assistant_color);curl_global_cleanup();return 0;}
+int main(int argc,char**argv){App a={0};if(!gtk_init_check(&argc,&argv)){g_printerr("Не удалось подключиться к графическому дисплею. Запустите программу из терминала рабочего стола или настройте DISPLAY/X11 forwarding.\n");return 1;}curl_global_init(CURL_GLOBAL_DEFAULT);a.project_root=g_canonicalize_filename(".",NULL);a.allow_read=TRUE;a.config_dir=g_build_filename(g_get_user_config_dir(),"gtk2aichat",NULL);g_mkdir_with_parents(a.config_dir,0700);a.history_path=config_file(&a,"history.json");a.settings_path=config_file(&a,"settings.conf");a.agents_path=config_file(&a,"agents.json");a.chats=g_ptr_array_new_with_free_func(chat_free);a.agents=g_ptr_array_new_with_free_func(agent_free);a.attachments=g_ptr_array_new_with_free_func(g_free);load_settings(&a);if(!g_file_test(a.project_root,G_FILE_TEST_IS_DIR))set_str(&a.project_root,".");{gchar*canonical=g_canonicalize_filename(a.project_root,NULL);set_str(&a.project_root,canonical);g_free(canonical);}a.mcp=mcp_manager_new(a.project_root);load_agents(&a);load_history(&a);build_ui(&a);refresh_list(&a);if(!a.chats->len)new_chat(&a,FALSE);else select_chat(&a,g_ptr_array_index(a.chats,0));gtk_main();if(a.autosave_id)g_source_remove(a.autosave_id);save_history(&a);save_agents(&a);save_settings(&a);mcp_manager_free(a.mcp);g_ptr_array_free(a.attachments,TRUE);g_ptr_array_free(a.agents,TRUE);g_ptr_array_free(a.chats,TRUE);g_free(a.project_root);g_free(a.config_dir);g_free(a.history_path);g_free(a.settings_path);g_free(a.agents_path);g_free(a.provider);g_free(a.openai_url);g_free(a.openai_key);g_free(a.openai_model);g_free(a.ollama_url);g_free(a.ollama_model);g_free(a.emoji_font);g_free(a.user_color);g_free(a.assistant_color);curl_global_cleanup();return 0;}

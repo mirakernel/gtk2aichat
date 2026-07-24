@@ -4,7 +4,6 @@
 #include <glib/gstdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
 
 #define MAX_TOOL_OUTPUT (256 * 1024)
 #define MAX_FILE_SIZE (1024 * 1024)
@@ -41,7 +40,6 @@ json_object *agent_tools_schema(void) {
     static const gchar *search_required[]={"query",NULL};
     static const gchar *write_required[]={"path","content",NULL};
     static const gchar *replace_required[]={"path","old_text","new_text",NULL};
-    static const gchar *build_required[]={"command",NULL};
     static const gchar *skill_required[]={"name",NULL};
 
     p=json_object_new_object();
@@ -63,15 +61,6 @@ json_object *agent_tools_schema(void) {
     json_object_object_add(p,"old_text",property("string","Exact text that must occur exactly once."));
     json_object_object_add(p,"new_text",property("string","Replacement text."));
     add_tool(tools,"replace_in_file","Replace one exact, unique text fragment. Requires write permission.",p,replace_required);
-    p=json_object_new_object();
-    {json_object *command=property("string","Allowed command to run in the project root.");
-     json_object *values=json_object_new_array();
-     json_object_array_add(values,json_object_new_string("make"));
-     json_object_array_add(values,json_object_new_string("make clean"));
-     json_object_array_add(values,json_object_new_string("git diff --check"));
-     json_object_array_add(values,json_object_new_string("desktop-file-validate gtk2aichat.desktop"));
-     json_object_object_add(command,"enum",values);json_object_object_add(p,"command",command);}
-    add_tool(tools,"run_build","Run one allowlisted build or validation command without a shell. Requires build permission.",p,build_required);
     p=json_object_new_object();
     add_tool(tools,"list_skills","List project skills found under .agents/skills, .codex/skills, or skills.",p,NULL);
     p=json_object_new_object();
@@ -184,22 +173,6 @@ static gchar *write_atomic(const gchar *path,const gchar *content){
     g_free(tmp);return g_strdup("OK: file written atomically");
 }
 
-static gchar *run_command(const gchar *root,const gchar *command){
-    gchar **argv=NULL,*stdout_data=NULL,*stderr_data=NULL;gint status=0;GError*error=NULL;GString*out;
-    if(!strcmp(command,"make")){argv=g_new0(gchar*,2);argv[0]=g_strdup("make");}
-    else if(!strcmp(command,"make clean")){argv=g_new0(gchar*,3);argv[0]=g_strdup("make");argv[1]=g_strdup("clean");}
-    else if(!strcmp(command,"git diff --check")){argv=g_new0(gchar*,4);argv[0]=g_strdup("git");argv[1]=g_strdup("diff");argv[2]=g_strdup("--check");}
-    else if(!strcmp(command,"desktop-file-validate gtk2aichat.desktop")){argv=g_new0(gchar*,3);argv[0]=g_strdup("desktop-file-validate");argv[1]=g_strdup("gtk2aichat.desktop");}
-    else return error_result("command is not allowlisted");
-    if(!g_spawn_sync(root,argv,NULL,G_SPAWN_SEARCH_PATH,NULL,NULL,&stdout_data,&stderr_data,&status,&error)){
-        gchar*r=error_result("%s",error->message);g_error_free(error);g_strfreev(argv);return r;}
-    out=g_string_new("");if(stdout_data)g_string_append(out,stdout_data);if(stderr_data)g_string_append(out,stderr_data);
-    if(WIFEXITED(status)){gchar*prefix=g_strdup_printf("exit code: %d\n",WEXITSTATUS(status));g_string_prepend(out,prefix);g_free(prefix);}
-    else g_string_prepend(out,"process terminated abnormally\n");
-    if(out->len>MAX_TOOL_OUTPUT)g_string_truncate(out,MAX_TOOL_OUTPUT);
-    g_free(stdout_data);g_free(stderr_data);g_strfreev(argv);return g_string_free(out,FALSE);
-}
-
 static const gchar *skill_roots[]={".agents/skills",".codex/skills","skills",NULL};
 
 static gchar *list_skills(const gchar *root){
@@ -247,8 +220,8 @@ static gchar *read_skill(const gchar *root,const gchar *name){
 }
 
 gchar *agent_tool_execute(const gchar *name,json_object *arguments,const gchar *project_root,
-                          gboolean allow_read,gboolean allow_write,gboolean allow_build){
-    const gchar *path_arg,*query,*content,*old_text,*new_text,*command;gchar*path,*data,*result;GString*out;
+                          gboolean allow_read,gboolean allow_write){
+    const gchar *path_arg,*query,*content,*old_text,*new_text;gchar*path,*data,*result;GString*out;
     if(!name||!arguments)return error_result("invalid tool call");
     if((!strcmp(name,"list_files")||!strcmp(name,"read_file")||!strcmp(name,"search_files")||
         !strcmp(name,"list_skills")||!strcmp(name,"read_skill"))&&!allow_read)
@@ -283,10 +256,6 @@ gchar *agent_tool_execute(const gchar *name,json_object *arguments,const gchar *
          if(!first||second){g_free(data);g_free(path);return error_result("old_text must occur exactly once");}
          out=g_string_new_len(data,first-data);g_string_append(out,new_text);g_string_append(out,first+strlen(old_text));result=write_atomic(path,out->str);g_string_free(out,TRUE);}
         g_free(data);g_free(path);return result;
-    }
-    if(!strcmp(name,"run_build")){
-        if(!allow_build)return error_result("build permission is disabled");
-        command=arg_string(arguments,"command");if(!command)return error_result("command is required");return run_command(project_root,command);
     }
     if(!strcmp(name,"list_skills"))return list_skills(project_root);
     if(!strcmp(name,"read_skill"))return read_skill(project_root,arg_string(arguments,"name"));
