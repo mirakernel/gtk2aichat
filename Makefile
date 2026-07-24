@@ -8,10 +8,18 @@ PKGS := gtk+-2.0 gthread-2.0 libcurl json-c
 
 all: gtk2aichat
 
-gtk2aichat: src/main.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $< -o $@ $$(pkg-config --cflags --libs $(PKGS))
+SOURCES := src/main.c src/agent_tools.c
+
+gtk2aichat: $(SOURCES)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) $(SOURCES) -o $@ $$(pkg-config --cflags --libs $(PKGS))
+
+test-agent-tools: tests/test_agent_tools.c src/agent_tools.c src/agent_tools.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(WARNINGS) tests/test_agent_tools.c src/agent_tools.c -o $@ $$(pkg-config --cflags --libs glib-2.0 json-c)
+
+test: test-agent-tools
+	./test-agent-tools
 
 clean:
-	rm -f gtk2aichat
+	rm -f gtk2aichat test-agent-tools
 
-.PHONY: all clean
+.PHONY: all test clean
