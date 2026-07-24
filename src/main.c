@@ -522,11 +522,85 @@ static void queue_stream_event(Job *job, const gchar *delta, const gchar *error,
     g_idle_add(deliver_stream, event);
 }
 
-static size_t plain_write_cb(void *p,size_t s,size_t n,void *u){
-    Buffer *buffer=u;size_t size=s*n;char *next=realloc(buffer->data,buffer->len+size+1);
+typedef struct { gchar *id; GString *name, *arguments; } ToolCall;
+typedef struct {
+    Job *job;
+    GString *pending, *content;
+    GPtrArray *calls;
+    Buffer raw;
+    gboolean openai;
+} StreamRound;
+
+static void tool_call_free(gpointer data){
+    ToolCall *call=data;if(!call)return;g_free(call->id);
+    if(call->name)g_string_free(call->name,TRUE);
+    if(call->arguments)g_string_free(call->arguments,TRUE);
+    g_free(call);
+}
+static ToolCall *stream_tool_call(StreamRound *round,guint index){
+    while(round->calls->len<=index){
+        ToolCall *call=g_new0(ToolCall,1);call->name=g_string_new("");call->arguments=g_string_new("");
+        g_ptr_array_add(round->calls,call);
+    }
+    return g_ptr_array_index(round->calls,index);
+}
+static void stream_text(StreamRound *round,const gchar *text){
+    if(text&&*text){g_string_append(round->content,text);queue_stream_event(round->job,text,NULL,FALSE);}
+}
+static void parse_stream_message(StreamRound *round,const gchar *line){
+    const gchar *json=line;json_object *root,*choices,*choice,*delta,*message,*content,*calls;
+    while(g_ascii_isspace(*json))json++;
+    if(round->openai){
+        if(!g_str_has_prefix(json,"data:"))return;
+        json+=5;while(g_ascii_isspace(*json))json++;
+        if(!strcmp(json,"[DONE]"))return;
+    }
+    if(!*json)return;
+    root=json_tokener_parse(json);if(!root)return;
+    message=NULL;
+    if(round->openai){
+        if(json_object_object_get_ex(root,"choices",&choices)&&json_object_array_length(choices)){
+            choice=json_object_array_get_idx(choices,0);
+            if(json_object_object_get_ex(choice,"delta",&delta))message=delta;
+        }
+    }else if(json_object_object_get_ex(root,"message",&message)){}
+    if(message&&json_object_object_get_ex(message,"content",&content)&&json_object_is_type(content,json_type_string))
+        stream_text(round,json_object_get_string(content));
+    if(message&&json_object_object_get_ex(message,"tool_calls",&calls)&&json_object_is_type(calls,json_type_array)){
+        guint i;
+        for(i=0;i<json_object_array_length(calls);i++){
+            json_object *part=json_object_array_get_idx(calls,i),*value,*function,*args;
+            guint index=i;ToolCall *call;
+            if(round->openai&&json_object_object_get_ex(part,"index",&value))index=(guint)json_object_get_int(value);
+            call=stream_tool_call(round,index);
+            if(json_object_object_get_ex(part,"id",&value)&&json_object_is_type(value,json_type_string))set_str(&call->id,json_object_get_string(value));
+            if(json_object_object_get_ex(part,"function",&function)){
+                if(json_object_object_get_ex(function,"name",&value)&&json_object_is_type(value,json_type_string)){
+                    if(round->openai)g_string_append(call->name,json_object_get_string(value));
+                    else g_string_assign(call->name,json_object_get_string(value));
+                }
+                if(json_object_object_get_ex(function,"arguments",&args)){
+                    if(json_object_is_type(args,json_type_string))g_string_append(call->arguments,json_object_get_string(args));
+                    else g_string_assign(call->arguments,json_object_to_json_string_ext(args,JSON_C_TO_STRING_PLAIN));
+                }
+            }
+        }
+    }
+    json_object_put(root);
+}
+static void process_stream_lines(StreamRound *round){
+    gchar *newline;
+    while((newline=strchr(round->pending->str,'\n'))!=NULL){
+        gsize length=(gsize)(newline-round->pending->str);gchar *line=g_strndup(round->pending->str,length);
+        if(length&&line[length-1]=='\r')line[length-1]='\0';
+        parse_stream_message(round,line);g_free(line);g_string_erase(round->pending,0,length+1);
+    }
+}
+static size_t stream_write_cb(void *p,size_t s,size_t n,void *u){
+    StreamRound *round=u;size_t size=s*n;char *next=realloc(round->raw.data,round->raw.len+size+1);
     if(!next)return 0;
-    buffer->data=next;memcpy(next+buffer->len,p,size);buffer->len+=size;next[buffer->len]='\0';
-    return size;
+    round->raw.data=next;memcpy(next+round->raw.len,p,size);round->raw.len+=size;next[round->raw.len]='\0';
+    g_string_append_len(round->pending,p,size);process_stream_lines(round);return size;
 }
 static int progress_cb(void *data, curl_off_t dltotal, curl_off_t dlnow,
                        curl_off_t ultotal, curl_off_t ulnow) {
@@ -546,70 +620,71 @@ static gchar *extract_answer(const char *body,gboolean openai){ json_object*r=js
     json_object_put(r);
     return out;
 }
-static json_object *json_clone(json_object *value){
-    return json_tokener_parse(json_object_to_json_string_ext(value,JSON_C_TO_STRING_PLAIN));
-}
-static json_object *response_message(json_object *response,gboolean openai){
-    json_object *choices,*message;
-    if(openai){
-        if(!json_object_object_get_ex(response,"choices",&choices)||!json_object_array_length(choices))return NULL;
-        choices=json_object_array_get_idx(choices,0);
-        return json_object_object_get_ex(choices,"message",&message)?message:NULL;
+static json_object *assembled_tool_message(StreamRound *round){
+    json_object *message=json_object_new_object(),*calls=json_object_new_array();guint i;
+    json_object_object_add(message,"role",json_object_new_string("assistant"));
+    if(round->content->len)json_object_object_add(message,"content",json_object_new_string(round->content->str));
+    else if(round->openai)json_object_object_add(message,"content",NULL);
+    else json_object_object_add(message,"content",json_object_new_string(""));
+    for(i=0;i<round->calls->len;i++){
+        ToolCall *call=g_ptr_array_index(round->calls,i);json_object *item=json_object_new_object(),*function=json_object_new_object(),*args;
+        if(!call->name->len)continue;
+        if(round->openai){
+            json_object_object_add(item,"id",json_object_new_string(call->id?call->id:"call_unknown"));
+            json_object_object_add(item,"type",json_object_new_string("function"));
+            json_object_object_add(function,"arguments",json_object_new_string(call->arguments->str));
+        }else{
+            args=json_tokener_parse(call->arguments->str);
+            json_object_object_add(function,"arguments",args?args:json_object_new_object());
+        }
+        json_object_object_add(function,"name",json_object_new_string(call->name->str));
+        json_object_object_add(item,"function",function);json_object_array_add(calls,item);
     }
-    return json_object_object_get_ex(response,"message",&message)?message:NULL;
+    json_object_object_add(message,"tool_calls",calls);return message;
 }
 static gpointer worker(gpointer p){
-    Job*j=p;json_object*request=json_tokener_parse(j->request),*messages,*response=NULL,*message,*calls,*content;
-    gchar*error=NULL,*final_text=NULL;guint round;
+    Job*j=p;json_object*request=json_tokener_parse(j->request),*messages;
+    gchar*error=NULL;gboolean final_received=FALSE;guint round;
     if(!request||!json_object_object_get_ex(request,"messages",&messages)){error=g_strdup("Не удалось создать запрос инструментов");goto done;}
-    for(round=0;round<12&&!error&&!final_text;round++){
-        CURL*c=curl_easy_init();struct curl_slist*h=NULL;Buffer body={calloc(1,1),0};CURLcode rc=CURLE_FAILED_INIT;long status=0;
+    for(round=0;round<12&&!error&&!final_received;round++){
+        CURL*c=curl_easy_init();struct curl_slist*h=NULL;CURLcode rc=CURLE_FAILED_INIT;long status=0;
+        StreamRound stream={j,g_string_new(""),g_string_new(""),g_ptr_array_new_with_free_func(tool_call_free),{calloc(1,1),0},j->openai};
         gchar*payload=g_strdup(json_object_to_json_string_ext(request,JSON_C_TO_STRING_PLAIN));
         if(c){h=curl_slist_append(h,"Content-Type: application/json");if(j->openai&&j->key[0]){gchar*auth=g_strdup_printf("Authorization: Bearer %s",j->key);h=curl_slist_append(h,auth);g_free(auth);}
             curl_easy_setopt(c,CURLOPT_URL,j->url);curl_easy_setopt(c,CURLOPT_HTTPHEADER,h);curl_easy_setopt(c,CURLOPT_POSTFIELDS,payload);
-            curl_easy_setopt(c,CURLOPT_WRITEFUNCTION,plain_write_cb);curl_easy_setopt(c,CURLOPT_WRITEDATA,&body);curl_easy_setopt(c,CURLOPT_CONNECTTIMEOUT,15L);curl_easy_setopt(c,CURLOPT_TIMEOUT,300L);
+            curl_easy_setopt(c,CURLOPT_WRITEFUNCTION,stream_write_cb);curl_easy_setopt(c,CURLOPT_WRITEDATA,&stream);curl_easy_setopt(c,CURLOPT_CONNECTTIMEOUT,15L);curl_easy_setopt(c,CURLOPT_TIMEOUT,300L);
             curl_easy_setopt(c,CURLOPT_USERAGENT,"gtk2aichat/0.4");curl_easy_setopt(c,CURLOPT_NOPROGRESS,0L);curl_easy_setopt(c,CURLOPT_XFERINFOFUNCTION,progress_cb);curl_easy_setopt(c,CURLOPT_XFERINFODATA,j->app);
             rc=curl_easy_perform(c);curl_easy_getinfo(c,CURLINFO_RESPONSE_CODE,&status);}
+        if(stream.pending->len){g_string_append_c(stream.pending,'\n');process_stream_lines(&stream);}
         if(rc==CURLE_ABORTED_BY_CALLBACK)error=g_strdup("Запрос отменён");
         else if(rc!=CURLE_OK)error=g_strdup_printf("Сетевая ошибка: %s",curl_easy_strerror(rc));
-        else if(status<200||status>=300){gchar*api=extract_answer(body.data?body.data:"",j->openai);error=api?api:g_strdup_printf("HTTP %ld: %.500s",status,body.data?body.data:"");}
-        else{response=json_tokener_parse(body.data?body.data:"");if(!response)error=g_strdup("Сервер вернул некорректный JSON");}
-        g_free(payload);curl_slist_free_all(h);if(c)curl_easy_cleanup(c);free(body.data);
-        if(error)break;
-        message=response_message(response,j->openai);
-        if(!message){error=g_strdup("В ответе отсутствует сообщение ассистента");json_object_put(response);response=NULL;break;}
-        if(json_object_object_get_ex(message,"tool_calls",&calls)&&json_object_array_length(calls)>0){
-            guint i;
-            json_object_array_add(messages,json_clone(message));
-            for(i=0;i<json_object_array_length(calls);i++){
-                json_object*call=json_object_array_get_idx(calls,i),*function,*name_value,*args_value,*id_value,*tool_message;
-                json_object*args=NULL;const gchar*name=NULL,*id=NULL;gchar*result;
-                if(!json_object_object_get_ex(call,"function",&function)||!json_object_object_get_ex(function,"name",&name_value)){continue;}
-                name=json_object_get_string(name_value);
-                if(json_object_object_get_ex(function,"arguments",&args_value)){
-                    if(json_object_is_type(args_value,json_type_string))args=json_tokener_parse(json_object_get_string(args_value));
-                    else args=json_clone(args_value);
-                }
+        else if(status<200||status>=300){gchar*api=extract_answer(stream.raw.data?stream.raw.data:"",j->openai);error=api?api:g_strdup_printf("HTTP %ld: %.500s",status,stream.raw.data?stream.raw.data:"");}
+        g_free(payload);curl_slist_free_all(h);if(c)curl_easy_cleanup(c);
+        if(!error&&stream.calls->len){
+            guint i;json_object *assistant=assembled_tool_message(&stream);
+            json_object_array_add(messages,assistant);
+            for(i=0;i<stream.calls->len;i++){
+                ToolCall*call=g_ptr_array_index(stream.calls,i);json_object*args=NULL,*tool_message;const gchar*name,*id;gchar*result;
+                if(!call->name->len)continue;
+                name=call->name->str;id=call->id;
+                args=json_tokener_parse(call->arguments->str);
                 if(!args)args=json_object_new_object();
                 if(mcp_manager_has_tool(j->app->mcp,name))result=mcp_manager_call(j->app->mcp,name,args);
                 else result=agent_tool_execute(name,args,j->app->project_root,g_atomic_int_get(&j->app->allow_read),g_atomic_int_get(&j->app->allow_write));
                 tool_message=json_object_new_object();json_object_object_add(tool_message,"role",json_object_new_string("tool"));json_object_object_add(tool_message,"content",json_object_new_string(result));
-                if(json_object_object_get_ex(call,"id",&id_value)){id=json_object_get_string(id_value);json_object_object_add(tool_message,"tool_call_id",json_object_new_string(id));}
+                if(id)json_object_object_add(tool_message,"tool_call_id",json_object_new_string(id));
                 if(!j->openai)json_object_object_add(tool_message,"tool_name",json_object_new_string(name));
                 json_object_array_add(messages,tool_message);queue_log_event(j->app,name,g_str_has_prefix(result,"ERROR:")?"ОШИБКА":"ГОТОВО");
                 g_free(result);json_object_put(args);
             }
-            json_object_put(response);response=NULL;continue;
-        }
-        if(json_object_object_get_ex(message,"content",&content)&&json_object_is_type(content,json_type_string))
-            final_text=g_strdup(json_object_get_string(content));
-        else error=g_strdup("Модель не вернула текст или вызов инструмента");
-        json_object_put(response);response=NULL;
+            if(stream.content->len)queue_stream_event(j,"\n\n",NULL,FALSE);
+        }else if(!error&&stream.content->len)final_received=TRUE;
+        else if(!error)error=g_strdup("Модель не вернула текст или вызов инструмента");
+        free(stream.raw.data);g_string_free(stream.pending,TRUE);g_string_free(stream.content,TRUE);g_ptr_array_free(stream.calls,TRUE);
     }
-    if(!error&&!final_text)error=g_strdup("Превышен лимит из 12 последовательных вызовов инструментов");
-    if(final_text&&*final_text)queue_stream_event(j,final_text,NULL,FALSE);
+    if(!error&&!final_received)error=g_strdup("Превышен лимит из 12 последовательных вызовов инструментов");
 done:
-    queue_stream_event(j,NULL,error,TRUE);g_free(final_text);g_free(error);if(response)json_object_put(response);if(request)json_object_put(request);
+    queue_stream_event(j,NULL,error,TRUE);g_free(error);if(request)json_object_put(request);
     g_free(j->request);g_free(j->url);g_free(j->key);g_free(j);return NULL;
 }
 static void on_send(GtkButton*b,gpointer data){
@@ -651,7 +726,7 @@ static void on_send(GtkButton*b,gpointer data){
     root=json_object_new_object();
     json_object_object_add(root,"model",json_object_new_string(model));
     json_object_object_add(root,"messages",messages_json(a,a->current));
-    json_object_object_add(root,"stream",json_object_new_boolean(FALSE));
+    json_object_object_add(root,"stream",json_object_new_boolean(TRUE));
     {json_object*tools=agent_tools_schema(),*mcp_tools=mcp_manager_tools_schema(a->mcp);guint tool_index;
      for(tool_index=0;tool_index<json_object_array_length(mcp_tools);tool_index++)json_object_array_add(tools,json_object_get(json_object_array_get_idx(mcp_tools,tool_index)));
      json_object_put(mcp_tools);json_object_object_add(root,"tools",tools);}
