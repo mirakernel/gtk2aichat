@@ -943,7 +943,7 @@ static GtkWidget *build_log_page(App *a){
 static void build_ui(App*a){
     GtkWidget *v=gtk_vbox_new(FALSE,0),*tools=gtk_hbox_new(FALSE,5),*paned=gtk_hpaned_new(),*sidebar=gtk_vbox_new(FALSE,0);
     GtkWidget *right=gtk_vbox_new(FALSE,0),*viewbar=gtk_hbox_new(FALSE,5),*chat=gtk_hpaned_new(),*conversation=gtk_vbox_new(FALSE,0),*compose_outer=gtk_vbox_new(FALSE,4),*compose=gtk_hbox_new(FALSE,5),*meta=gtk_hbox_new(FALSE,8),*inspector=gtk_vbox_new(FALSE,7);
-    GtkWidget *n=gtk_button_new_with_label("＋ Новый чат"),*tmp=gtk_button_new_with_label("Временный"),*del=gtk_button_new_with_label("Удалить"),*settings=gtk_button_new_from_stock(GTK_STOCK_PREFERENCES),*emoji=gtk_button_new_with_label("😀"),*attach=gtk_button_new_with_label("▣"),*is,*label,*button,*permission;
+    GtkWidget *n=gtk_button_new_with_label("Новый чат"),*tmp=gtk_button_new_with_label("Временный"),*del=gtk_button_new_with_label("Удалить"),*settings=gtk_button_new_from_stock(GTK_STOCK_PREFERENCES),*emoji=gtk_button_new_with_label("😀"),*attach=gtk_button_new_with_label("▣"),*is,*label,*button,*permission;
     GtkListStore*store=gtk_list_store_new(2,G_TYPE_STRING,G_TYPE_UINT),*attachment_store=gtk_list_store_new(2,G_TYPE_STRING,G_TYPE_STRING);GtkCellRenderer*r=gtk_cell_renderer_text_new();GtkAccelGroup*accel=gtk_accel_group_new();guint i;
     const gchar *views[]={"Разговор","Агенты","Журнал инструментов"};
     a->window=gtk_window_new(GTK_WINDOW_TOPLEVEL);gtk_window_set_title(GTK_WINDOW(a->window),"Agent Desk — GTK2 AI Desktop");gtk_window_add_accel_group(GTK_WINDOW(a->window),accel);
