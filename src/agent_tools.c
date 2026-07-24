@@ -42,6 +42,7 @@ json_object *agent_tools_schema(void) {
     static const gchar *write_required[]={"path","content",NULL};
     static const gchar *replace_required[]={"path","old_text","new_text",NULL};
     static const gchar *build_required[]={"command",NULL};
+    static const gchar *skill_required[]={"name",NULL};
 
     p=json_object_new_object();
     json_object_object_add(p,"path",property("string","Directory relative to the project root; use . for the root."));
@@ -71,6 +72,11 @@ json_object *agent_tools_schema(void) {
      json_object_array_add(values,json_object_new_string("desktop-file-validate gtk2aichat.desktop"));
      json_object_object_add(command,"enum",values);json_object_object_add(p,"command",command);}
     add_tool(tools,"run_build","Run one allowlisted build or validation command without a shell. Requires build permission.",p,build_required);
+    p=json_object_new_object();
+    add_tool(tools,"list_skills","List project skills found under .agents/skills, .codex/skills, or skills.",p,NULL);
+    p=json_object_new_object();
+    json_object_object_add(p,"name",property("string","Skill directory name returned by list_skills."));
+    add_tool(tools,"read_skill","Read a project's SKILL.md instructions by skill name.",p,skill_required);
     return tools;
 }
 
@@ -194,11 +200,58 @@ static gchar *run_command(const gchar *root,const gchar *command){
     g_free(stdout_data);g_free(stderr_data);g_strfreev(argv);return g_string_free(out,FALSE);
 }
 
+static const gchar *skill_roots[]={".agents/skills",".codex/skills","skills",NULL};
+
+static gchar *list_skills(const gchar *root){
+    GString*out=g_string_new("");guint i;
+    for(i=0;skill_roots[i];i++){
+        gchar*base=g_build_filename(root,skill_roots[i],NULL);GDir*dir=g_dir_open(base,0,NULL);const gchar*name;
+        if(!dir){g_free(base);continue;}
+        while((name=g_dir_read_name(dir))){
+            gchar*file=g_build_filename(base,name,"SKILL.md",NULL);
+            if(g_file_test(file,G_FILE_TEST_IS_REGULAR)&&!g_file_test(file,G_FILE_TEST_IS_SYMLINK)){
+                gchar*data=NULL;if(g_file_get_contents(file,&data,NULL,NULL)){
+                    gchar*description=strstr(data,"description:");gchar*end=description?strchr(description,'\n'):NULL;
+                    if(description){description+=12;while(g_ascii_isspace(*description))description++;}
+                    if(end&&description<end)g_string_append_printf(out,"%s — %.*s\n",name,(gint)(end-description),description);
+                    else g_string_append_printf(out,"%s\n",name);
+                    g_free(data);
+                }
+            }
+            g_free(file);
+        }
+        g_dir_close(dir);g_free(base);
+    }
+    if(!out->len)g_string_append(out,"No project skills found.");
+    return g_string_free(out,FALSE);
+}
+
+static gchar *read_skill(const gchar *root,const gchar *name){
+    guint i;
+    if(!name||!*name||strspn(name,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")!=strlen(name))
+        return error_result("invalid skill name");
+    for(i=0;skill_roots[i];i++){
+        gchar*file=g_build_filename(root,skill_roots[i],name,"SKILL.md",NULL);
+        if(g_file_test(file,G_FILE_TEST_IS_REGULAR)&&!g_file_test(file,G_FILE_TEST_IS_SYMLINK)){
+            gchar*data=NULL;gsize length=0;
+            if(g_file_get_contents(file,&data,&length,NULL)){
+                g_free(file);
+                if(length>MAX_TOOL_OUTPUT){g_free(data);return error_result("SKILL.md exceeds 256 KiB");}
+                if(!g_utf8_validate(data,length,NULL)){g_free(data);return error_result("SKILL.md is not UTF-8");}
+                return data;
+            }
+        }
+        g_free(file);
+    }
+    return error_result("skill not found");
+}
+
 gchar *agent_tool_execute(const gchar *name,json_object *arguments,const gchar *project_root,
                           gboolean allow_read,gboolean allow_write,gboolean allow_build){
     const gchar *path_arg,*query,*content,*old_text,*new_text,*command;gchar*path,*data,*result;GString*out;
     if(!name||!arguments)return error_result("invalid tool call");
-    if((!strcmp(name,"list_files")||!strcmp(name,"read_file")||!strcmp(name,"search_files"))&&!allow_read)
+    if((!strcmp(name,"list_files")||!strcmp(name,"read_file")||!strcmp(name,"search_files")||
+        !strcmp(name,"list_skills")||!strcmp(name,"read_skill"))&&!allow_read)
         return error_result("read permission is disabled");
     if(!strcmp(name,"list_files")){
         path_arg=arg_string(arguments,"path");path=safe_path(project_root,path_arg,FALSE);if(!path)return error_result("path is outside the project");
@@ -235,5 +288,7 @@ gchar *agent_tool_execute(const gchar *name,json_object *arguments,const gchar *
         if(!allow_build)return error_result("build permission is disabled");
         command=arg_string(arguments,"command");if(!command)return error_result("command is required");return run_command(project_root,command);
     }
+    if(!strcmp(name,"list_skills"))return list_skills(project_root);
+    if(!strcmp(name,"read_skill"))return read_skill(project_root,arg_string(arguments,"name"));
     return error_result("unknown tool: %s",name);
 }

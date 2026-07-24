@@ -61,8 +61,23 @@ static void test_write_permissions_and_replace(void) {
 
 static void test_schema(void) {
     json_object *schema=agent_tools_schema();
-    g_assert_cmpuint(json_object_array_length(schema),==,6);
+    g_assert_cmpuint(json_object_array_length(schema),==,8);
     json_object_put(schema);
+}
+
+static void test_skills(void) {
+    gchar *root=temporary_project(),*directory=g_build_filename(root,".agents","skills","demo",NULL);
+    gchar *file=g_build_filename(directory,"SKILL.md",NULL),*result;json_object *args;
+    g_assert_cmpint(g_mkdir_with_parents(directory,0755),==,0);
+    g_assert_true(g_file_set_contents(file,"---\nname: demo\ndescription: Demo skill\n---\nUse this instruction.\n",-1,NULL));
+    args=json_object_new_object();result=agent_tool_execute("list_skills",args,root,TRUE,FALSE,FALSE);
+    g_assert_nonnull(strstr(result,"demo"));g_assert_nonnull(strstr(result,"Demo skill"));g_free(result);json_object_put(args);
+    args=args1("name","demo");result=agent_tool_execute("read_skill",args,root,TRUE,FALSE,FALSE);
+    g_assert_nonnull(strstr(result,"Use this instruction."));g_free(result);json_object_put(args);
+    g_remove(file);g_rmdir(directory);g_free(directory);
+    directory=g_build_filename(root,".agents","skills",NULL);g_rmdir(directory);g_free(directory);
+    directory=g_build_filename(root,".agents",NULL);g_rmdir(directory);g_free(directory);
+    g_rmdir(root);g_free(file);g_free(root);
 }
 
 int main(int argc,char **argv) {
@@ -71,5 +86,6 @@ int main(int argc,char **argv) {
     g_test_add_func("/agent-tools/read-search",test_read_and_search);
     g_test_add_func("/agent-tools/write-replace",test_write_permissions_and_replace);
     g_test_add_func("/agent-tools/schema",test_schema);
+    g_test_add_func("/agent-tools/skills",test_skills);
     return g_test_run();
 }
