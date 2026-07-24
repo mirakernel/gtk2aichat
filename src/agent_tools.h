@@ -10,5 +10,6 @@ gchar *agent_tool_execute(const gchar *name,
                           const gchar *project_root,
                           gboolean allow_read,
                           gboolean allow_write);
+gchar *agent_tool_file_diff(const gchar *project_root, const gchar *relative_path);
 
 #endif

@@ -261,3 +261,29 @@ gchar *agent_tool_execute(const gchar *name,json_object *arguments,const gchar *
     if(!strcmp(name,"read_skill"))return read_skill(project_root,arg_string(arguments,"name"));
     return error_result("unknown tool: %s",name);
 }
+
+gchar *agent_tool_file_diff(const gchar *project_root,const gchar *relative_path){
+    gchar *path,*stdout_data=NULL,*stderr_data=NULL,*contents=NULL;gchar *argv[]={"git","diff","--no-ext-diff","--",NULL,NULL};
+    gchar *tracked_argv[]={"git","ls-files","--error-unmatch","--",NULL,NULL};
+    gint status=0;GError *error=NULL;GString *diff;
+    path=safe_path(project_root,relative_path,FALSE);
+    if(!path)return NULL;
+    argv[4]=(gchar*)relative_path;
+    if(!g_spawn_sync(project_root,argv,NULL,G_SPAWN_SEARCH_PATH,NULL,NULL,&stdout_data,&stderr_data,&status,&error)){
+        if(error)g_error_free(error);
+        g_free(path);g_free(stderr_data);return NULL;
+    }
+    if(stdout_data&&*stdout_data){g_free(path);g_free(stderr_data);return stdout_data;}
+    g_free(stdout_data);g_free(stderr_data);
+    tracked_argv[4]=(gchar*)relative_path;
+    if(g_spawn_sync(project_root,tracked_argv,NULL,G_SPAWN_SEARCH_PATH|G_SPAWN_STDOUT_TO_DEV_NULL|G_SPAWN_STDERR_TO_DEV_NULL,
+        NULL,NULL,NULL,NULL,&status,NULL)&&status==0){g_free(path);return NULL;}
+    if(!g_file_get_contents(path,&contents,NULL,NULL)||!g_utf8_validate(contents,-1,NULL)){g_free(contents);g_free(path);return NULL;}
+    diff=g_string_new("");g_string_append_printf(diff,"diff --git a/%s b/%s\nnew file mode 100644\n--- /dev/null\n+++ b/%s\n",relative_path,relative_path,relative_path);
+    {gchar **lines=g_strsplit(contents,"\n",-1);guint i,count=0,line_count;while(lines[count])count++;
+     line_count=count;if(line_count&&!*lines[line_count-1])line_count--;
+     g_string_append_printf(diff,"@@ -0,0 +1,%u @@\n",line_count);
+     for(i=0;lines[i];i++){if(!lines[i+1]&&!*lines[i])break;g_string_append_c(diff,'+');g_string_append(diff,lines[i]);g_string_append_c(diff,'\n');}
+     g_strfreev(lines);}
+    g_free(contents);g_free(path);return g_string_free(diff,FALSE);
+}

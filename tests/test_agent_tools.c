@@ -56,6 +56,8 @@ static void test_write_permissions_and_replace(void) {
     g_assert_true(g_str_has_prefix(result,"OK:"));g_free(result);json_object_put(args);
     g_assert_true(g_file_get_contents(path,&contents,NULL,NULL));
     g_assert_cmpstr(contents,==,"before changed after");
+    g_free(contents);contents=agent_tool_file_diff(root,"edit.txt");
+    g_assert_nonnull(contents);g_assert_nonnull(strstr(contents,"+++ b/edit.txt"));g_assert_nonnull(strstr(contents,"+before changed after"));
     g_free(contents);g_remove(path);g_rmdir(root);g_free(path);g_free(root);
 }
 
