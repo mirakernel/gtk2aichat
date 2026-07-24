@@ -839,7 +839,7 @@ static void on_mcp_dialog(GtkButton *button,gpointer data){
     d=gtk_dialog_new_with_buttons("MCP и skills",GTK_WINDOW(a->window),GTK_DIALOG_MODAL,
         GTK_STOCK_REFRESH,GTK_RESPONSE_APPLY,GTK_STOCK_CLOSE,GTK_RESPONSE_CLOSE,NULL);
     label=left_label(text);gtk_label_set_selectable(GTK_LABEL(label),TRUE);gtk_label_set_line_wrap(GTK_LABEL(label),TRUE);
-    gtk_container_set_border_width(GTK_CONTAINER(label),12);gtk_box_pack_start(GTK_BOX(GTK_DIALOG(d)->vbox),label,TRUE,TRUE,0);gtk_widget_show_all(d);
+    gtk_misc_set_padding(GTK_MISC(label),12,12);gtk_box_pack_start(GTK_BOX(GTK_DIALOG(d)->vbox),label,TRUE,TRUE,0);gtk_widget_show_all(d);
     if(gtk_dialog_run(GTK_DIALOG(d))==GTK_RESPONSE_APPLY){
         if(a->busy)gtk_label_set_text(GTK_LABEL(a->status),"Дождитесь завершения ответа перед перезагрузкой MCP");
         else reload_mcp(a);
